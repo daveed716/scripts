@@ -12,7 +12,9 @@ Usage example::
 Required environment variables:
 
 ```
-EBAY_APP_ID="your-ebay-app-id"
+EBAY_CLIENT_ID="your-ebay-client-id"
+EBAY_CLIENT_SECRET="your-ebay-client-secret"
+
 SERPAPI_KEY="your-serpapi-key"  # used for Amazon search results
 ```
 
@@ -26,10 +28,15 @@ import logging
 import math
 import os
 import re
+
+import time
+
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import requests
+from requests.auth import HTTPBasicAuth
+
 from bs4 import BeautifulSoup
 
 try:
@@ -75,6 +82,9 @@ class Deal:
 class DealCollector:
     def __init__(self) -> None:
         self.session = self._create_session()
+        self._ebay_token: Optional[str] = None
+        self._ebay_token_expiry: float = 0.0
+
 
     def _create_session(self) -> requests.Session:
         if cloudscraper is not None:
@@ -141,60 +151,92 @@ class DealCollector:
 
     # --- eBay ------------------------------------------------------------------
 
+
+    def _get_ebay_access_token(self) -> Optional[str]:
+        client_id = os.getenv("EBAY_CLIENT_ID")
+        client_secret = os.getenv("EBAY_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            logging.info("Skipping eBay; EBAY_CLIENT_ID/EBAY_CLIENT_SECRET are not set")
+            return None
+        # Refresh the token when it is close to expiry
+        if self._ebay_token and time.time() < self._ebay_token_expiry - 60:
+            return self._ebay_token
+        response = self.session.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            data={
+                "grant_type": "client_credentials",
+                "scope": "https://api.ebay.com/oauth/api_scope/buy.browse",
+            },
+            auth=HTTPBasicAuth(client_id, client_secret),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        token_payload = response.json()
+        token = token_payload.get("access_token")
+        expires_in = token_payload.get("expires_in")
+        if not token:
+            logging.warning("eBay auth response did not contain an access token")
+            return None
+        if isinstance(expires_in, (int, float)):
+            self._ebay_token_expiry = time.time() + float(expires_in)
+        else:
+            self._ebay_token_expiry = time.time() + 3600.0
+        self._ebay_token = token
+        return token
+
     def _fetch_ebay(self, limit: int) -> Sequence[Deal]:
-        app_id = os.getenv("EBAY_APP_ID")
-        if not app_id:
-            logging.info("Skipping eBay; EBAY_APP_ID is not set")
+        token = self._get_ebay_access_token()
+        if not token:
             return []
         params = {
-            "OPERATION-NAME": "findItemsByKeywords",
-            "SERVICE-VERSION": "1.13.0",
-            "SECURITY-APPNAME": app_id,
-            "RESPONSE-DATA-FORMAT": "JSON",
-            "REST-PAYLOAD": "true",
-            "keywords": "SATA internal hard drive",
-            "itemFilter(0).name": "ListingType",
-            "itemFilter(0).value": "FixedPrice",
-            "itemFilter(1).name": "Condition",
-            "itemFilter(1).value": "New",
-            "paginationInput.entriesPerPage": str(limit),
-            "outputSelector": "SellerInfo",
+            "q": "SATA internal hard drive",
+            "limit": str(limit),
+            "filter": "buyingOptions:{FIXED_PRICE},conditionIds:{1000}",
         }
         response = self.session.get(
-            "https://svcs.ebay.com/services/search/FindingService/v1",
+            "https://api.ebay.com/buy/browse/v1/item_summary/search",
             params=params,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            },
+
             timeout=30,
         )
         response.raise_for_status()
         payload = response.json()
-        raw_items = (
-            payload.get("findItemsByKeywordsResponse", [{}])[0]
-            .get("searchResult", [{}])[0]
-            .get("item", [])
-        )
+
+        raw_items = payload.get("itemSummaries", [])
         deals: List[Deal] = []
         for item in raw_items:
-            title = item.get("title", [""])[0]
+            title = item.get("title", "")
+
+
             if not self._looks_like_sata(title):
                 continue
             capacity = self._parse_capacity_tb(title)
             if not capacity:
-                subtitle = item.get("subtitle", [""])[0]
-                capacity = self._parse_capacity_tb(subtitle)
+
+                capacity = self._parse_capacity_tb(item.get("shortDescription", ""))
             if not capacity:
                 continue
-            selling = item.get("sellingStatus", [{}])[0]
-            price = self._clean_price(
-                selling.get("convertedCurrentPrice", [{}])[0].get("__value__")
-            )
-            if price is None:
+            price_info = item.get("price", {})
+            try:
+                price = float(price_info.get("value"))
+            except (TypeError, ValueError):
                 continue
-            shipping_cost = self._clean_price(
-                item.get("shippingInfo", [{}])[0]
-                .get("shippingServiceCost", [{}])[0]
-                .get("__value__")
-            ) or 0.0
-            link = item.get("viewItemURL", [""])[0]
+            shipping_cost = 0.0
+            for option in item.get("shippingOptions", []):
+                cost_info = option.get("shippingCost", {})
+                try:
+                    shipping_cost = float(cost_info.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                else:
+                    break
+            link = item.get("itemWebUrl") or item.get("itemHref") or ""
+
             deals.append(
                 Deal(
                     source="eBay",
