@@ -14,6 +14,7 @@ Required environment variables:
 ```
 EBAY_CLIENT_ID="your-ebay-client-id"
 EBAY_CLIENT_SECRET="your-ebay-client-secret"
+
 SERPAPI_KEY="your-serpapi-key"  # used for Amazon search results
 ```
 
@@ -27,12 +28,15 @@ import logging
 import math
 import os
 import re
+
 import time
+
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import requests
 from requests.auth import HTTPBasicAuth
+
 from bs4 import BeautifulSoup
 
 try:
@@ -80,6 +84,7 @@ class DealCollector:
         self.session = self._create_session()
         self._ebay_token: Optional[str] = None
         self._ebay_token_expiry: float = 0.0
+
 
     def _create_session(self) -> requests.Session:
         if cloudscraper is not None:
@@ -146,6 +151,7 @@ class DealCollector:
 
     # --- eBay ------------------------------------------------------------------
 
+
     def _get_ebay_access_token(self) -> Optional[str]:
         client_id = os.getenv("EBAY_CLIENT_ID")
         client_secret = os.getenv("EBAY_CLIENT_SECRET")
@@ -195,18 +201,23 @@ class DealCollector:
                 "Authorization": f"Bearer {token}",
                 "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
             },
+
             timeout=30,
         )
         response.raise_for_status()
         payload = response.json()
+
         raw_items = payload.get("itemSummaries", [])
         deals: List[Deal] = []
         for item in raw_items:
             title = item.get("title", "")
+
+
             if not self._looks_like_sata(title):
                 continue
             capacity = self._parse_capacity_tb(title)
             if not capacity:
+
                 capacity = self._parse_capacity_tb(item.get("shortDescription", ""))
             if not capacity:
                 continue
@@ -225,6 +236,7 @@ class DealCollector:
                 else:
                     break
             link = item.get("itemWebUrl") or item.get("itemHref") or ""
+
             deals.append(
                 Deal(
                     source="eBay",

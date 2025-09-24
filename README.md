@@ -16,8 +16,10 @@ pip install -r requirements.txt
 
 The script expects API credentials via environment variables:
 
+
 - `EBAY_CLIENT_ID` – eBay REST API client identifier.
 - `EBAY_CLIENT_SECRET` – eBay REST API client secret.
+
 - `SERPAPI_KEY` – SerpAPI key used to query Amazon search results.
 
 ### Usage
